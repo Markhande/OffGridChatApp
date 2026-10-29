@@ -1,5 +1,12 @@
 package com.saurabh.offgridchat.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material.icons.filled.Call
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +21,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material3.IconButton
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.saurabh.offgridchat.attachments.Attachment
+import com.saurabh.offgridchat.ui.components.AttachmentMessage
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -52,9 +65,22 @@ fun ChatDetailScreen(
     val c = LocalOgColors.current
     val a = LocalOgAccent.current
 
+    val context = LocalContext.current
+    val callState by vm.callState.collectAsStateWithLifecycle()
+    val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) vm.startCall(address)
+        else Toast.makeText(context, "Allow microphone access to make voice calls.", Toast.LENGTH_LONG).show()
+    }
+
     val convos by vm.conversations.collectAsStateWithLifecycle()
     val msgs by vm.messages.collectAsStateWithLifecycle()
     val peerStates by vm.reachability.collectAsStateWithLifecycle()
+    val transfers by vm.fileTransfers.collectAsStateWithLifecycle()
+    val transfer = transfers[address]
+    val sendingFile = transfer == "Preparing file…" || transfer?.startsWith("Sending") == true
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.sendFile(address, uri)
+    }
 
     val convo =
         convos.firstOrNull {
@@ -174,6 +200,22 @@ fun ChatDetailScreen(
                             modifier =
                                 Modifier.size(20.dp)
                         )
+                    }
+
+                    IconButton(
+                        onClick = {
+                            if (!connected || peerState != PeerReachability.DIRECT) {
+                                Toast.makeText(context, "Voice calls need a direct Bluetooth connection.", Toast.LENGTH_LONG).show()
+                            } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                                vm.startCall(address)
+                            } else microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
+                        },
+                        enabled = !callState.ongoing,
+                        modifier = Modifier.size(38.dp).clip(CircleShape).background(c.fill)
+                            .border(1.dp, c.border, CircleShape)
+                    ) {
+                        Icon(Icons.Default.Call, contentDescription = "Voice call", modifier = Modifier.size(20.dp),
+                            tint = if (connected && peerState == PeerReachability.DIRECT && !callState.ongoing) a.a1 else c.textMuted)
                     }
 
                     OgAvatar(
@@ -363,9 +405,10 @@ fun ChatDetailScreen(
                 }
             }
 
-            /* ====================================================
-               INPUT
-               ==================================================== */
+            transfer?.let {
+                Text(it, color = c.textMuted, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 22.dp, vertical = 4.dp))
+            }
 
             GlassCard(
                 Modifier
@@ -387,6 +430,14 @@ fun ChatDetailScreen(
                     horizontalArrangement =
                         Arrangement.spacedBy(8.dp)
                 ) {
+
+                    IconButton(
+                        onClick = { picker.launch(arrayOf("*/*")) },
+                        enabled = connected && !sendingFile
+                    ) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Attach file",
+                            tint = if (connected && !sendingFile) a.a1 else c.textMuted)
+                    }
 
                     BasicTextField(
                         value = text,
@@ -547,7 +598,10 @@ private fun Bubble(
                 )
         ) {
 
-            Text(
+            val attachment = remember(m.text) { Attachment.fromMessage(m.text) }
+            if (attachment != null) {
+                AttachmentMessage(attachment, m, if (m.fromMe) a.on else c.text)
+            } else Text(
                 text = m.text,
                 color =
                     if (m.fromMe) {

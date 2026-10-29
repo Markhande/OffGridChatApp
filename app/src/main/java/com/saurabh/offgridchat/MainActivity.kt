@@ -28,9 +28,13 @@ import com.saurabh.offgridchat.ui.theme.DefaultAccent
 import com.saurabh.offgridchat.ui.theme.OffGridChatTheme
 import com.saurabh.offgridchat.ui.theme.ThemeMode
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
+import com.saurabh.offgridchat.calling.VoiceCallManager
+import com.saurabh.offgridchat.calling.CallOverlay
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    @Inject lateinit var calls: VoiceCallManager
 
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
@@ -82,6 +86,7 @@ class MainActivity : ComponentActivity() {
 
             OffGridChatTheme(mode = mode, accent = accent) {
                 MainNavigation(prefs)
+                CallOverlay(calls)
             }
         }
     }

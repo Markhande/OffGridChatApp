@@ -1,6 +1,7 @@
 package com.saurabh.offgridchat.viewmodel
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.saurabh.offgridchat.core.BluetoothController
@@ -40,6 +41,10 @@ class BluetoothViewModel @Inject constructor(
     private val btController: BluetoothController,
     private val chatExporter: ChatExporter
 ) : ViewModel() {
+    val fileTransfers: StateFlow<Map<String, String>> = btController.fileTransfers
+    fun sendFile(address: String, uri: Uri) = btController.sendFile(address, uri)
+    val callState = btController.calls.state
+    fun startCall(address: String) { viewModelScope.launch { btController.startVoiceCall(address) } }
 
     /* ============================================================
        BLUETOOTH STATE

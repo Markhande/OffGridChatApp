@@ -345,7 +345,8 @@ fun ChatsScreen(
                                         modifier = Modifier.fillMaxWidth()
                                     ) {
                                         Text(
-                                            text = lastMsg ?: (if (isConnected) "Connected • Ready to chat" else "Offline"),
+                                            text = lastMsg?.let { com.saurabh.offgridchat.attachments.Attachment.fromMessage(it)?.let { file -> "📎 ${file.name}" } ?: it }
+                                                ?: (if (isConnected) "Connected • Ready to chat" else "Offline"),
                                             fontSize = 13.sp,
                                             color = if (lastMsg != null) c.textMuted else (if (isConnected) c.ok else c.textMuted),
                                             maxLines = 1,

@@ -1,6 +1,11 @@
 package com.saurabh.offgridchat.core
 
 import android.annotation.SuppressLint
+import com.saurabh.offgridchat.calling.VoiceCallManager
+import javax.crypto.SecretKey
+import android.net.Uri
+import com.saurabh.offgridchat.attachments.AttachmentStore
+import kotlinx.coroutines.CompletableDeferred
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
@@ -134,6 +139,7 @@ private class PeerConnection(
 
     var readJob: Job? = null
     var handshakeTimeout: Job? = null
+    var voiceKey: SecretKey? = null
 }
 
 @Singleton
@@ -146,8 +152,53 @@ class BluetoothController @Inject constructor(
     private val identityManager: IdentityManager,
     private val cryptoManager: CryptoManager,
     private val prefs: Preferences,
-    private val groups: GroupRepository
+    private val groups: GroupRepository,
+    private val attachments: AttachmentStore,
+    val calls: VoiceCallManager
 ) {
+    private val fileAcks = ConcurrentHashMap<String, Pair<String, CompletableDeferred<Unit>>>()
+    val fileTransfers = MutableStateFlow<Map<String, String>>(emptyMap())
+
+    fun sendFile(address: String, uri: Uri) {
+        if (fileTransfers.value[address]?.startsWith("Sending") == true ||
+            fileTransfers.value[address] == "Preparing file…") return
+        fileTransfers.update { it + (address to "Preparing file…") }
+        scope.launch(Dispatchers.IO) {
+            try {
+                val attachment = attachments.prepare(uri)
+                val destination = resolveDestinationNodeId(address) ?: error("Peer is disconnected.")
+                val conversation = resolveConversationAddress(address, destination)
+                val finalId = UUID.randomUUID().toString()
+                val sent = messageDelivery.send(
+                    ChatMessage(messageId = finalId, address = conversation, nodeId = destination,
+                        text = attachment.message(), fromMe = true, time = System.currentTimeMillis(),
+                        status = MESSAGE_STATUS_SENDING), EncryptedResult.CURRENT_VERSION
+                ) {
+                    attachments.file(attachment).inputStream().use { input ->
+                        val count = AttachmentStore.chunkCount(attachment.size)
+                        for (index in 0 until count) {
+                            val size = minOf(AttachmentStore.CHUNK_BYTES.toLong(),
+                                attachment.size - index.toLong() * AttachmentStore.CHUNK_BYTES).toInt()
+                            val bytes = ByteArray(size)
+                            java.io.DataInputStream(input).readFully(bytes)
+                            val payload = attachment.json().put("index", index)
+                                .put("data", Base64.getEncoder().encodeToString(bytes)).toString()
+                            fileTransfers.update { it + (address to "Sending ${attachment.name} · ${index * 100 / count}%") }
+                            if (!send(payload, address, PacketType.FILE_CHUNK,
+                                    if (index == count - 1) finalId else UUID.randomUUID().toString())) return@send false
+                        }
+                    }
+                    true
+                }
+                check(sent) { "Transfer interrupted. Reconnect and select the file to retry." }
+                fileTransfers.update { it + (address to "File delivered") }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                fileTransfers.update { it + (address to (e.message ?: "Could not send file.")) }
+            }
+        }
+    }
 
     private val app =
         context.applicationContext
@@ -469,6 +520,7 @@ class BluetoothController @Inject constructor(
         }
 
     init {
+        calls.bindTransport { node, payload, audio -> sendVoicePacket(node, payload, audio) }
         scope.launch {
             prefs.relayModeFlow.collectLatest { relayEnabled = it }
         }
@@ -1544,8 +1596,11 @@ class BluetoothController @Inject constructor(
         ) return false
         if (packet.packetType == PacketType.ROUTE_ANNOUNCE && packet.ttl !in 1..ROUTE_ANNOUNCE_TTL) return false
 
+        if (packet.packetType == PacketType.CALL_SIGNAL || packet.packetType == PacketType.CALL_AUDIO)
+            return receiveVoicePacket(peer, packet, peerName)
+
         val localData =
-            (packet.packetType == PacketType.DATA || packet.packetType == PacketType.CONNECT_REQUEST ||
+            (packet.packetType == PacketType.DATA || packet.packetType == PacketType.FILE_CHUNK || packet.packetType == PacketType.CONNECT_REQUEST ||
                     packet.packetType == PacketType.GROUP_DATA) &&
                     packet.destinationNodeId == myIdentity.nodeId
         // Local DATA is deduplicated only after successful decryption, in Room.
@@ -1626,7 +1681,7 @@ class BluetoothController @Inject constructor(
         return when (
             packet.packetType
         ) {
-            PacketType.GROUP_DATA -> false // Handled above before the direct-conversation path.
+            PacketType.GROUP_DATA, PacketType.CALL_SIGNAL, PacketType.CALL_AUDIO -> false // Handled above.
             PacketType.AUTH_HELLO,
             PacketType.AUTH_PROOF -> false
 
@@ -1634,7 +1689,7 @@ class BluetoothController @Inject constructor(
                DATA
                ==================================================== */
 
-            PacketType.DATA -> {
+            PacketType.DATA, PacketType.FILE_CHUNK -> {
 
                 /*
                  * Not our destination -> RELAY.
@@ -1731,6 +1786,18 @@ class BluetoothController @Inject constructor(
                         return false
                     }
 
+                val messageText = if (packet.packetType == PacketType.FILE_CHUNK) {
+                    if (chatRepo.admitIncomingIdentity(admissionRequest, prefs.connectionPolicyFlow.first()) !=
+                        com.saurabh.offgridchat.protocol.ConnectionAdmission.ALLOW) return false
+                    val completed = try { attachments.receive(packet.sourceNodeId, plaintext) }
+                        catch (_: Exception) { return false }
+                    if (completed == null) {
+                        sendDeliveryAck(packet)
+                        return true
+                    }
+                    completed.message()
+                } else plaintext
+
                 val message =
                     ChatMessage(
                         messageId =
@@ -1743,7 +1810,7 @@ class BluetoothController @Inject constructor(
                             packet.sourceNodeId,
 
                         text =
-                            plaintext,
+                            messageText,
 
                         fromMe =
                             false,
@@ -1799,6 +1866,16 @@ class BluetoothController @Inject constructor(
                 val acknowledgedMessageId =
                     packet.ackMessageId
                         ?: return false
+
+                fileAcks[acknowledgedMessageId]?.let { (destination, completion) ->
+                    if (destination != packet.sourceNodeId) return false
+                    chatRepo.getMessageById(acknowledgedMessageId)?.let {
+                        if (it.fromMe && it.nodeId == destination)
+                            chatRepo.updateMessageStatus(acknowledgedMessageId, MESSAGE_STATUS_DELIVERED)
+                    }
+                    completion.complete(Unit)
+                    return true
+                }
 
                 if (groups.receipt(packet, MESSAGE_STATUS_DELIVERED)) return true
 
@@ -2294,9 +2371,53 @@ class BluetoothController @Inject constructor(
        SEND
        ============================================================ */
 
+    suspend fun startVoiceCall(address: String) {
+        val node = resolveDestinationNodeId(address) ?: return
+        val name = chatRepo.getConversationByNodeId(node)?.name ?: address
+        calls.start(node, name)
+    }
+
+    private fun voiceKey(peer: PeerConnection): SecretKey = synchronized(peer) {
+        peer.voiceKey ?: cryptoManager.deriveSessionKey(identityManager.getIdentityPrivateKey(),
+            identityManager.getIdentityPublicKey(), identityManager.decodePublicKey(checkNotNull(peer.publicKeyHex)))
+            .also { peer.voiceKey = it }
+    }
+
+    /** Voice never floods or relays; it uses the authenticated peer's existing direct socket. */
+    private suspend fun sendVoicePacket(node: String, payload: String, audio: Boolean): Boolean = withContext(Dispatchers.IO) {
+        val peer = activePeers.values.firstOrNull { it.authenticated && it.nodeId == node } ?: return@withContext false
+        if (!chatRepo.canConnectIdentity(node, false)) return@withContext false
+        try {
+            val identity = identityManager.getIdentity()
+            val header = MeshPacket(sourceNodeId = identity.nodeId, destinationNodeId = node,
+                previousHopId = identity.nodeId, ttl = 1,
+                packetType = if (audio) PacketType.CALL_AUDIO else PacketType.CALL_SIGNAL,
+                sourcePublicKey = identity.publicKeyHex, encrypted = true, encryptionVersion = EncryptedResult.CURRENT_VERSION)
+            val encrypted = cryptoManager.encryptPayload(payload, voiceKey(peer), header.authenticatedHeader())
+            sendPacketToPeer(peer, signPacket(header.copy(payload = encrypted.toJson())))
+        } catch (e: CancellationException) { throw e } catch (_: Exception) { false }
+    }
+
+    private suspend fun receiveVoicePacket(peer: PeerConnection, packet: MeshPacket, name: String): Boolean {
+        if (!peer.authenticated || packet.sourceNodeId != peer.nodeId ||
+            packet.destinationNodeId != identityManager.getIdentity().nodeId || packet.ttl != 1 ||
+            kotlin.math.abs(System.currentTimeMillis() - packet.timestamp) > 60_000 ||
+            !chatRepo.canConnectIdentity(packet.sourceNodeId, false, respectRemoteDecision = false)) return false
+        val encrypted = EncryptedResult.fromJson(packet.payload) ?: return false
+        if (!packet.encrypted || packet.encryptionVersion != encrypted.v) return false
+        val plaintext = try { cryptoManager.decryptPayload(encrypted, voiceKey(peer), packet.authenticatedHeader()) }
+            catch (_: Exception) { return false }
+        if (packet.packetType == PacketType.CALL_AUDIO) calls.receiveAudio(packet.sourceNodeId, plaintext)
+        else calls.receiveSignal(packet.sourceNodeId,
+            chatRepo.getConversationByNodeId(packet.sourceNodeId)?.name ?: name, plaintext)
+        return true
+    }
+
     suspend fun send(
         text: String,
-        targetAddress: String? = null
+        targetAddress: String? = null,
+        packetType: PacketType = PacketType.DATA,
+        outgoingId: String = UUID.randomUUID().toString()
     ): Boolean =
         withContext(Dispatchers.IO) {
 
@@ -2352,9 +2473,7 @@ class BluetoothController @Inject constructor(
                 identityManager
                     .getIdentityPublicKey()
 
-            val messageId =
-                UUID.randomUUID()
-                    .toString()
+            val messageId = outgoingId
 
             val timestamp =
                 System.currentTimeMillis()
@@ -2382,7 +2501,7 @@ class BluetoothController @Inject constructor(
                         MeshPacket.DEFAULT_TTL,
 
                     packetType =
-                        PacketType.DATA,
+                        packetType,
 
                     timestamp =
                         timestamp,
@@ -2481,6 +2600,21 @@ class BluetoothController @Inject constructor(
                     target,
                     destinationNodeId
                 )
+
+            if (packetType == PacketType.FILE_CHUNK) {
+                val completion = CompletableDeferred<Unit>()
+                fileAcks[messageId] = destinationNodeId to completion
+                try {
+                    if (!requestRemoteApproval(destinationNodeId, destinationPublicKey)) return@withContext false
+                    repeat(3) {
+                        if (sendPacketToDestination(signedPacket) &&
+                            withTimeoutOrNull(15_000) { completion.await(); true } == true) return@withContext true
+                    }
+                    return@withContext false
+                } finally {
+                    fileAcks.remove(messageId)
+                }
+            }
 
             messageDelivery.send(
                 ChatMessage(
@@ -3398,7 +3532,10 @@ class BluetoothController @Inject constructor(
 
     private fun disconnectPeer(peer: PeerConnection) {
         val removed = activePeers.remove(peer.address, peer)
-        if (removed) publishSocketStates()
+        if (removed) {
+            publishSocketStates()
+            peer.nodeId?.let { calls.peerDisconnected(it) }
+        }
         peer.readJob?.cancel()
         peer.handshakeTimeout?.cancel()
         runCatching { peer.socket.close() }

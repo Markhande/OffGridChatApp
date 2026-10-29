@@ -335,7 +335,8 @@ data class MeshPacket(
 
         if (
             packetType.name ==
-            DATA_PACKET_TYPE || packetType == PacketType.GROUP_DATA
+            DATA_PACKET_TYPE || packetType == PacketType.GROUP_DATA || packetType == PacketType.FILE_CHUNK ||
+                    packetType == PacketType.CALL_SIGNAL || packetType == PacketType.CALL_AUDIO
         ) {
 
             if (!encrypted) {
@@ -353,6 +354,10 @@ data class MeshPacket(
             ) {
                 return false
             }
+        }
+
+        if (packetType == PacketType.CALL_SIGNAL || packetType == PacketType.CALL_AUDIO) {
+            if (ttl != 1 || payload.length > 8_192 || destinationNodeId == BROADCAST_NODE_ID) return false
         }
 
         if (
