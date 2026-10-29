@@ -1,0 +1,114 @@
+# ==============================================================================
+# OFFGRID CHAT - PROGUARD / R8 KEEP RULES
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. GENERAL & DEBUGGING ATTRIBUTES
+# ------------------------------------------------------------------------------
+# Retain stack trace line numbers and source file names for crash reports
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
+
+# Retain annotations, generic type signatures, inner classes, and enclosing methods
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
+
+# Retain native methods
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+# ------------------------------------------------------------------------------
+# 2. KOTLIN & COROUTINES
+# ------------------------------------------------------------------------------
+-dontwarn kotlinx.coroutines.**
+-keepclassmembers class * {
+    kotlin.coroutines.Continuation continuation;
+}
+
+# Keep Kotlin Enum methods
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# ------------------------------------------------------------------------------
+# 3. ROOM DATABASE
+# ------------------------------------------------------------------------------
+# Keep Room database, DAOs, and entities
+-keep @androidx.room.Entity class * { *; }
+-keep @androidx.room.Dao interface * { *; }
+-keep @androidx.room.Database class * { *; }
+-keep class * extends androidx.room.RoomDatabase { *; }
+
+# Keep Room generated implementations
+-keep class *_Impl { *; }
+
+# Prevent stripping/renaming Room Entity fields and constructors
+-keepclassmembers class * {
+    @androidx.room.PrimaryKey *;
+    @androidx.room.ColumnInfo *;
+    @androidx.room.Embedded *;
+    @androidx.room.Relation *;
+    @androidx.room.TypeConverter *;
+}
+
+# ------------------------------------------------------------------------------
+# 4. HILT & DAGGER DEPENDENCY INJECTION
+# ------------------------------------------------------------------------------
+-keep class * extends android.app.Application { *; }
+-keep @dagger.hilt.android.HiltAndroidApp class * { *; }
+-keep @dagger.Module class * { *; }
+-keepclassmembers class * {
+    @javax.inject.Inject <init>(...);
+    @javax.inject.Inject *;
+}
+-keep class *_HiltModules* { *; }
+-keep class **.*Module_* { *; }
+
+# ------------------------------------------------------------------------------
+# 5. JETPACK COMPOSE
+# ------------------------------------------------------------------------------
+-keep class androidx.compose.ui.platform.NestedScrollInteropConnection { *; }
+-keepclassmembers class * {
+    @androidx.compose.runtime.Composable *;
+}
+
+# ------------------------------------------------------------------------------
+# 6. APP DATA MODELS, PROTOCOL PACKETS & CRYPTO
+# ------------------------------------------------------------------------------
+# Keep all database entities, DAOs, and DTOs
+-keep class com.saurabh.offgridchat.database.** { *; }
+
+# Keep protocol packets and enums (used in JSON serialization/deserialization)
+-keep class com.saurabh.offgridchat.protocol.** { *; }
+
+# Keep cryptographic models and managers
+-keep class com.saurabh.offgridchat.crypto.** { *; }
+
+# Keep domain models and tool utility objects
+-keep class com.saurabh.offgridchat.tools.** { *; }
+
+# Keep Preferences / DataStore data classes
+-keep class com.saurabh.offgridchat.datastore.** { *; }
+
+# ------------------------------------------------------------------------------
+# 7. JAVA CRYPTOGRAPHY & SECURITY PROVIDERS
+# ------------------------------------------------------------------------------
+-keep class java.security.** { *; }
+-keep class javax.crypto.** { *; }
+-keep class android.security.keystore.** { *; }
+
+# ------------------------------------------------------------------------------
+# 8. THIRD-PARTY LIBRARIES (COIL, HAZE, DATASTORE)
+# ------------------------------------------------------------------------------
+# Coil Image Loading
+-dontwarn coil.**
+-dontwarn coil3.**
+-keep class coil.** { *; }
+
+# Haze Blur
+-dontwarn dev.chrisbanes.haze.**
+-keep class dev.chrisbanes.haze.** { *; }
+
+# AndroidX DataStore
+-keep class androidx.datastore.** { *; }
