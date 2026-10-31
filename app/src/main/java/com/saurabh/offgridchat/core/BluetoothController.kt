@@ -129,7 +129,7 @@ private class PeerConnection(
 
     @Volatile
     var publicKeyHex: String? = null
-
+     //
     @Volatile
     var authenticated: Boolean = false
 
